@@ -28,6 +28,7 @@ class WP_Hook_Profiler_Callback_Wrapper {
                 'hook' => $this->hook_name,
                 'callback' => $callback_name,
                 'plugin' => $plugin_info['plugin'],
+                'plugin_name' => $plugin_info['plugin_name'],
                 'source_file' => $plugin_info['file'],
                 'total_time' => 0,
                 'call_count' => 0,

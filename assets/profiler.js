@@ -148,7 +148,7 @@ window.WP_Hook_Profiler = (function($) {
                 <tr>
                     <td><span class="wp-hook-profiler-callback-name" title="${escapeHtml(callback.source_file)}">${escapeHtml(callback.callback)}</span></td>
                     <td><span class="wp-hook-profiler-hook-name">${escapeHtml(callback.hook)}</span></td>
-                    <td><span class="wp-hook-profiler-plugin-name">${escapeHtml(callback.plugin)}</span></td>
+                    <td><span class="wp-hook-profiler-plugin-name">${escapeHtml(callback.plugin_name || callback.plugin)}</span></td>
                     <td class="numeric ${timeClass}">${timeMs.toFixed(3)}</td>
                     <td class="numeric">${callback.call_count}</td>
                 </tr>
@@ -167,14 +167,14 @@ window.WP_Hook_Profiler = (function($) {
         container.empty();
         
         Object.entries(hookGroups).forEach(([hookName, callbacks]) => {
-            const totalTime = callbacks.reduce((sum, cb) => sum + cb.execution_time, 0) * 1000;
+            const totalTime = callbacks.reduce((sum, cb) => sum + (cb.total_time || 0), 0) * 1000;
             const timeClass = getTimeColorClass(totalTime);
             
             const hookGroup = $(`
                 <div class="wp-hook-profiler-hook-group" data-hook="${hookName}">
                     <div class="wp-hook-profiler-hook-header">
                         ${escapeHtml(hookName)} 
-                        <span class="${timeClass}" style="float: right;">${totalTime.toFixed(3)}ms</span>
+                        <span class="${timeClass}" style="float: right;">${isNaN(totalTime) ? '0.000' : totalTime.toFixed(3)}ms</span>
                     </div>
                     <div class="wp-hook-profiler-hook-callbacks"></div>
                 </div>
@@ -191,11 +191,11 @@ window.WP_Hook_Profiler = (function($) {
                         <div class="wp-hook-profiler-callback-info">
                             <div class="wp-hook-profiler-callback-name">${escapeHtml(callback.callback)}</div>
                             <div class="wp-hook-profiler-callback-meta">
-                                Plugin: ${escapeHtml(callback.plugin)} | Priority: ${callback.priority}
+                                Plugin: ${escapeHtml(callback.plugin_name || callback.plugin)} | Priority: ${callback.priority}
                             </div>
                         </div>
                         <div class="wp-hook-profiler-callback-time ${timeClass}">
-                            ${timeMs.toFixed(3)}ms
+                            ${isNaN(timeMs) ? '0.000' : timeMs.toFixed(3)}ms
                         </div>
                     </div>
                 `);
@@ -209,16 +209,16 @@ window.WP_Hook_Profiler = (function($) {
     
     function populatePluginFilter() {
         if (!profileData?.plugins) return;
-        
+
         const select = $('#wp-hook-profiler-filter-plugin');
         const currentValue = select.val();
-        
+
         select.find('option:not(:first)').remove();
-        
+
         Object.values(profileData.plugins).forEach(plugin => {
             select.append(`<option value="${escapeHtml(plugin.plugin_name)}">${escapeHtml(plugin.plugin_name)}</option>`);
         });
-        
+
         select.val(currentValue);
     }
     
@@ -295,21 +295,103 @@ window.WP_Hook_Profiler = (function($) {
     function filterHooksList() {
         const searchTerm = $('#wp-hook-profiler-search-hooks').val().toLowerCase();
         const pluginFilter = $('#wp-hook-profiler-filter-plugin').val();
-        
+
+        // console.log('Plugin Filter:', pluginFilter, 'Search Term:', searchTerm);
+
+        // If only search term and no plugin filter, use simpler logic
+        if (!pluginFilter && searchTerm) {
+            return filterHooksBySearch(searchTerm);
+        }
+
         $('.wp-hook-profiler-hook-group').each(function() {
             const hookName = $(this).data('hook').toLowerCase();
             const matchesSearch = !searchTerm || hookName.includes(searchTerm);
-            
-            let matchesPlugin = !pluginFilter;
+
+            let hookHasMatchingCallbacks = !pluginFilter;
+            let visibleCallbackCount = 0;
+
             if (pluginFilter) {
-                const hasMatchingPlugin = $(this).find('.wp-hook-profiler-callback-meta')
-                    .toArray()
-                    .some(el => $(el).text().includes(`Plugin: ${pluginFilter}`));
-                matchesPlugin = hasMatchingPlugin;
+                // Filter individual callbacks within this hook group
+                const callbackItems = $(this).find('.wp-hook-profiler-callback-item');
+                callbackItems.each(function() {
+                    const callbackMeta = $(this).find('.wp-hook-profiler-callback-meta');
+                    const metaText = callbackMeta.text();
+
+                    // Check if this callback matches the plugin filter
+                    const matchesPlugin = metaText.includes(`Plugin: ${pluginFilter}`) ||
+                                        metaText.toLowerCase().includes(`plugin: ${pluginFilter.toLowerCase()}`) ||
+                                        metaText.toLowerCase().includes(pluginFilter.toLowerCase());
+
+                    if (matchesPlugin) {
+                        hookHasMatchingCallbacks = true;
+                        visibleCallbackCount++;
+                        $(this).show();
+                    } else {
+                        $(this).hide();
+                    }
+                });
+            } else {
+                // No plugin filter - show all callbacks
+                $(this).find('.wp-hook-profiler-callback-item').show();
+                hookHasMatchingCallbacks = true;
+                visibleCallbackCount = $(this).find('.wp-hook-profiler-callback-item').length;
             }
-            
-            $(this).toggle(matchesSearch && matchesPlugin);
+
+            // Show/hide the entire hook group based on whether it has matching callbacks
+            const shouldShowHook = matchesSearch && hookHasMatchingCallbacks && visibleCallbackCount > 0;
+            $(this).toggle(shouldShowHook);
+
+            // Update hook header to reflect filtered callback count
+            if (shouldShowHook && pluginFilter) {
+                const totalCallbacks = $(this).find('.wp-hook-profiler-callback-item').length;
+                const hookHeader = $(this).find('.wp-hook-profiler-hook-header');
+                const originalText = hookHeader.text().replace(/\(\d+\/\d+\)/, '').trim();
+                if (visibleCallbackCount !== totalCallbacks) {
+                    hookHeader.html(`${originalText} <small>(${visibleCallbackCount}/${totalCallbacks} callbacks)</small>`);
+                }
+            }
         });
+
+        // Summary of filtering results
+        const visibleHooks = $('.wp-hook-profiler-hook-group:visible').length;
+        const totalHooks = $('.wp-hook-profiler-hook-group').length;
+        const visibleCallbacks = $('.wp-hook-profiler-callback-item:visible').length;
+        const totalCallbacks = $('.wp-hook-profiler-callback-item').length;
+
+        // console.log(`Filter Results: ${visibleHooks}/${totalHooks} hooks visible, ${visibleCallbacks}/${totalCallbacks} callbacks visible`);
+    }
+
+    function filterHooksBySearch(searchTerm) {
+        $('.wp-hook-profiler-hook-group').each(function() {
+            const hookName = $(this).data('hook').toLowerCase();
+            const hookMatches = hookName.includes(searchTerm);
+
+            // Also search within callback names and meta
+            let callbackMatches = false;
+            $(this).find('.wp-hook-profiler-callback-item').each(function() {
+                const callbackName = $(this).find('.wp-hook-profiler-callback-name').text().toLowerCase();
+                const callbackMeta = $(this).find('.wp-hook-profiler-callback-meta').text().toLowerCase();
+
+                if (callbackName.includes(searchTerm) || callbackMeta.includes(searchTerm)) {
+                    callbackMatches = true;
+                    $(this).show();
+                } else {
+                    $(this).hide();
+                }
+            });
+
+            const shouldShow = hookMatches || callbackMatches;
+            $(this).toggle(shouldShow);
+
+            // If hook matches but no specific callbacks match, show all callbacks
+            if (hookMatches && !callbackMatches) {
+                $(this).find('.wp-hook-profiler-callback-item').show();
+            }
+        });
+
+        const visibleHooks = $('.wp-hook-profiler-hook-group:visible').length;
+        const totalHooks = $('.wp-hook-profiler-hook-group').length;
+        // console.log(`Search Results: ${visibleHooks}/${totalHooks} hooks visible`);
     }
     
     function groupCallbacksByHook(callbacks) {
@@ -323,7 +405,7 @@ window.WP_Hook_Profiler = (function($) {
         });
         
         Object.keys(groups).forEach(hookName => {
-            groups[hookName].sort((a, b) => b.execution_time - a.execution_time);
+            groups[hookName].sort((a, b) => (b.total_time || 0) - (a.total_time || 0));
         });
         
         return groups;
