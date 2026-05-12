@@ -1,0 +1,25 @@
+{
+    "name": "ultimate-multisite/hook-profiler",
+    "description": "WordPress hook profiler that measures execution time and memory of actions and filters to identify performance bottlenecks by plugin.",
+    "type": "wordpress-plugin",
+    "license": "GPL-2.0-or-later",
+    "homepage": "https://github.com/Ultimate-Multisite/hook-profiler",
+    "authors": [
+        {
+            "name": "Ultimate Multisite",
+            "homepage": "https://github.com/Ultimate-Multisite"
+        }
+    ],
+    "require": {
+        "php": ">=7.4",
+        "composer/installers": "^1.9 || ^2.0"
+    },
+    "config": {
+        "allow-plugins": {
+            "composer/installers": true
+        }
+    },
+    "extra": {
+        "installer-name": "hook-profiler"
+    }
+}
