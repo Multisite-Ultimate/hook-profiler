@@ -291,8 +291,21 @@ class WP_Hook_Profiler {
         // Capture metadata BEFORE doing anything expensive, so we can still
         // emit a minimal marker even if the rest of this function runs out of
         // memory (this is exactly the regression we're profiling).
-        $fatal       = error_get_last();
-        $is_fatal    = is_array($fatal) && in_array($fatal['type'] ?? 0, [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true);
+        //
+        // `error_get_last()` returns the most recent error of ANY severity —
+        // including deprecation notices that are routine on most pages. Only
+        // unrecoverable errors are interesting to the profile consumer, so
+        // we filter to the true-fatal severities and store `null` otherwise.
+        // We also include a human-readable severity label so the dump is
+        // self-describing (a bare type code like `1` means little out of
+        // context).
+        $last_error  = error_get_last();
+        $is_fatal    = is_array($last_error) && in_array($last_error['type'] ?? 0, [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true);
+        $fatal       = null;
+        if ($is_fatal) {
+            $fatal               = $last_error;
+            $fatal['type_label'] = $this->describe_error_severity($last_error['type'] ?? 0);
+        }
         $peak_bytes  = memory_get_peak_usage(true);
         $mem_limit   = (string) ini_get('memory_limit');
         $request_uri = $this->request_uri; // captured early; survives SAPI reset
@@ -355,6 +368,40 @@ class WP_Hook_Profiler {
 
         @file_put_contents($dump_path, $json, LOCK_EX);
         return;
+    }
+
+    /**
+     * Map a PHP error severity constant to its human-readable name.
+     *
+     * Used to annotate `fatal_error.type_label` in the dump so consumers
+     * (jq, dashboards, on-call humans) can read the severity without
+     * memorising the bit values.
+     *
+     * @param int $type One of the `E_*` constants.
+     * @return string   Severity name (e.g. `"E_ERROR"`) or `"E_UNKNOWN(<n>)"` if not recognised.
+     */
+    private function describe_error_severity($type) {
+        $map = [
+            E_ERROR             => 'E_ERROR',
+            E_WARNING           => 'E_WARNING',
+            E_PARSE             => 'E_PARSE',
+            E_NOTICE            => 'E_NOTICE',
+            E_CORE_ERROR        => 'E_CORE_ERROR',
+            E_CORE_WARNING      => 'E_CORE_WARNING',
+            E_COMPILE_ERROR     => 'E_COMPILE_ERROR',
+            E_COMPILE_WARNING   => 'E_COMPILE_WARNING',
+            E_USER_ERROR        => 'E_USER_ERROR',
+            E_USER_WARNING      => 'E_USER_WARNING',
+            E_USER_NOTICE       => 'E_USER_NOTICE',
+            E_RECOVERABLE_ERROR => 'E_RECOVERABLE_ERROR',
+            E_DEPRECATED        => 'E_DEPRECATED',
+            E_USER_DEPRECATED   => 'E_USER_DEPRECATED',
+        ];
+        if (defined('E_STRICT')) {
+            $map[E_STRICT] = 'E_STRICT';
+        }
+        $key = (int) $type;
+        return $map[$key] ?? ('E_UNKNOWN(' . $key . ')');
     }
 
     /**
