@@ -87,21 +87,33 @@ class WP_Hook_Profiler_Callback_Wrapper {
     public function __invoke(...$args ) {
 
         $callback_key = $this->callback_key;
+        $engine       = $this->engine;
 
-        if (!isset($this->engine->callback_aggregates[$callback_key])) {
-            $this->engine->callback_aggregates[$callback_key] = [
-                'hook' => $this->hook_name,
-                'callback' => $this->callback_name,
-                'plugin' => $this->plugin_info['plugin'],
-                'plugin_name' => $this->plugin_info['plugin_name'],
-                'source_file' => $this->plugin_info['file'],
-                'total_time' => 0,
-                'call_count' => 0,
-                'average_time' => 0,
-                'priority' => $this->priority,
-                'accepted_args' => $this->accepted_args
-            ];
+        // Callback cap: if we already have this key, just reuse it. Otherwise
+        // allocate a new row only while under the cap. Above the cap we still
+        // measure the call's time and credit it to plugin totals — only the
+        // per-callback row is suppressed.
+        $track_callback = isset($engine->callback_aggregates[$callback_key]);
+        if (!$track_callback) {
+            if (count($engine->callback_aggregates) < $engine->max_callbacks) {
+                $engine->callback_aggregates[$callback_key] = [
+                    'hook' => $this->hook_name,
+                    'callback' => $this->callback_name,
+                    'plugin' => $this->plugin_info['plugin'],
+                    'plugin_name' => $this->plugin_info['plugin_name'],
+                    'source_file' => $this->plugin_info['file'],
+                    'total_time' => 0,
+                    'call_count' => 0,
+                    'average_time' => 0,
+                    'priority' => $this->priority,
+                    'accepted_args' => $this->accepted_args
+                ];
+                $track_callback = true;
+            } else {
+                $engine->callbacks_capped = true;
+            }
         }
+
         $start = hrtime(true);
 
 		$original_function = $this->original_function;
@@ -109,40 +121,48 @@ class WP_Hook_Profiler_Callback_Wrapper {
         $end = hrtime(true);
         $eta = $end - $start;
         $eta /= 1e+6; // nanoseconds to milliseconds
-        
+
         if (is_finite($eta) && $eta >= 0) {
-            $this->engine->callback_aggregates[$callback_key]['total_time'] += $eta;
-            $this->engine->callback_aggregates[$callback_key]['call_count']++;
-            $this->engine->total_execution_time += $eta;
-            
-            if ($this->engine->callback_aggregates[$callback_key]['call_count'] > 0) {
-                $this->engine->callback_aggregates[$callback_key]['average_time'] = 
-                    $this->engine->callback_aggregates[$callback_key]['total_time'] / 
-                    $this->engine->callback_aggregates[$callback_key]['call_count'];
+            if ($track_callback) {
+                $row = &$engine->callback_aggregates[$callback_key];
+                $row['total_time']   += $eta;
+                $row['call_count']++;
+                $row['average_time']  = $row['total_time'] / $row['call_count'];
+                unset($row);
             }
+            $engine->total_execution_time += $eta;
 
             // Update plugin totals (guarded: only accumulate finite, non-negative values)
             $plugin_key = $this->plugin_info['plugin'];
-            if (!isset($this->engine->timing_data[$plugin_key])) {
-                $this->engine->timing_data[$plugin_key] = [
+            if (!isset($engine->timing_data[$plugin_key])) {
+                $engine->timing_data[$plugin_key] = [
                     'total_time' => 0,
                     'hook_count' => 0,
                     'callback_count' => 0,
+                    // Associative map: hook_name => true, for O(1) dedup.
+                    // Converted back to a list at read time in get_profile_data().
                     'hooks' => [],
                     'plugin_name' => $this->plugin_info['plugin_name'],
                     'plugin_file' => $this->plugin_info['plugin_file']
                 ];
             }
 
-            $this->engine->timing_data[$plugin_key]['total_time'] += $eta;
-            $this->engine->timing_data[$plugin_key]['callback_count']++;
+            $plugin_row = &$engine->timing_data[$plugin_key];
+            $plugin_row['total_time'] += $eta;
+            $plugin_row['callback_count']++;
 
-            if (!in_array($this->hook_name, $this->engine->timing_data[$plugin_key]['hooks'])) {
-                $this->engine->timing_data[$plugin_key]['hooks'][] = $this->hook_name;
-                $this->engine->timing_data[$plugin_key]['hook_count']++;
+            // Per-plugin hook cap: stop adding new hook names once over cap.
+            if (!isset($plugin_row['hooks'][$this->hook_name])) {
+                if ($plugin_row['hook_count'] < $engine->max_hooks_per_plugin) {
+                    $plugin_row['hooks'][$this->hook_name] = true;
+                    $plugin_row['hook_count']++;
+                } else {
+                    $engine->plugin_hooks_capped = true;
+                }
             }
+            unset($plugin_row);
         }
-        
+
         return $result;
     }
 }

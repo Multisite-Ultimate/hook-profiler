@@ -37,6 +37,25 @@ class WP_Hook_Profiler {
 
     /** @var WP_Hook_Profiler_Engine The profiling engine instance. */
     private WP_Hook_Profiler_Engine $profiler;
+
+    /**
+     * Pre-allocated memory reserve, released inside the shutdown handler so
+     * we have headroom to serialise profile data even if the request died of
+     * OOM. Allocated once during construction.
+     *
+     * @var string|null
+     */
+    private $memory_reserve = null;
+
+    /**
+     * Request URI captured at construction time. Some SAPIs (notably
+     * FrankenPHP worker mode) reset {@code $_SERVER} between requests, which
+     * means {@code $_SERVER['REQUEST_URI']} may be empty by the time the
+     * shutdown handler runs. Capturing early avoids that footgun.
+     *
+     * @var string
+     */
+    private $request_uri = '';
     
     /**
      * Return (and lazily create) the singleton instance.
@@ -63,6 +82,9 @@ class WP_Hook_Profiler {
      * @return void
      */
     private function init() {
+        // Capture REQUEST_URI early — see property docblock for rationale.
+        $this->request_uri = isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '';
+
         $this->load_profiler();
         add_action('admin_bar_menu', [$this, 'add_admin_bar_menu'], 999);
         add_action('wp_enqueue_scripts', [$this, 'enqueue_assets']);
@@ -79,6 +101,12 @@ class WP_Hook_Profiler {
         // Register shutdown dump so profile data survives fatal errors (OOM, timeout).
         // Opt-in via the WP_HOOK_PROFILER_DUMP_PATH constant or the
         // 'wp_hook_profiler_dump_path' filter — both must resolve to a writable file path.
+        //
+        // Pre-allocate a 1 MB memory reserve. When the shutdown handler runs
+        // after an OOM, we release this reserve first so json_encode has
+        // headroom to serialise the profile data. Without it, the shutdown
+        // handler itself OOMs and writes nothing.
+        $this->memory_reserve = str_repeat(' ', 1024 * 1024);
         register_shutdown_function([$this, 'dump_profile_data_on_shutdown']);
     }
     
@@ -222,6 +250,13 @@ class WP_Hook_Profiler {
      * @return void
      */
     public function dump_profile_data_on_shutdown() {
+        // Release the pre-allocated memory reserve first thing — this gives us
+        // ~1 MB of headroom even if the request died from OOM.
+        $this->memory_reserve = null;
+        if (function_exists('gc_collect_cycles')) {
+            @gc_collect_cycles();
+        }
+
         $dump_path = '';
 
         if (defined('WP_HOOK_PROFILER_DUMP_PATH') && is_string(WP_HOOK_PROFILER_DUMP_PATH)) {
@@ -239,10 +274,65 @@ class WP_Hook_Profiler {
             return;
         }
 
+        // If the dump path contains a {token} placeholder, substitute it with
+        // a short hash of the request URI so concurrent requests (e.g. a page
+        // load racing wp-cron) don't clobber each other's dumps. Without a
+        // placeholder, behaviour is unchanged — last writer wins.
+        if (strpos($dump_path, '{token}') !== false) {
+            $request_uri_for_token = $this->request_uri !== '' ? $this->request_uri : 'cli';
+            $token = substr(md5($request_uri_for_token), 0, 12);
+            $dump_path = str_replace('{token}', $token, $dump_path);
+        }
+
         if (!$this->profiler) {
             return;
         }
 
+        // Capture metadata BEFORE doing anything expensive, so we can still
+        // emit a minimal marker even if the rest of this function runs out of
+        // memory (this is exactly the regression we're profiling).
+        $fatal       = error_get_last();
+        $is_fatal    = is_array($fatal) && in_array($fatal['type'] ?? 0, [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true);
+        $peak_bytes  = memory_get_peak_usage(true);
+        $mem_limit   = (string) ini_get('memory_limit');
+        $request_uri = $this->request_uri; // captured early; survives SAPI reset
+
+        // Ensure parent directory exists. Failures are silent.
+        $dir = dirname($dump_path);
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0775, true);
+        }
+
+        // Step 1: write a minimal "I'm alive" marker FIRST. If the page died
+        // from OOM and there's not enough memory to serialise the full profile,
+        // at least we have proof the shutdown handler fired plus the fatal
+        // info. This file gets overwritten by the full dump in step 3 below
+        // if we make it that far.
+        $marker = [
+            'ts'                => time(),
+            'url'               => $request_uri,
+            'memory_peak_bytes' => $peak_bytes,
+            'memory_limit'      => $mem_limit,
+            'fatal_error'       => $fatal,
+            'profile'           => null,
+            'note'              => 'minimal marker — full profile dump was skipped or failed',
+        ];
+        $marker_json = json_encode($marker, JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR);
+        if ($marker_json !== false) {
+            @file_put_contents($dump_path, $marker_json, LOCK_EX);
+        }
+
+        // Step 2: on fatal error, free as much memory as we can before trying
+        // to serialise the full profile. Drop large internal caches first.
+        if ($is_fatal) {
+            if (function_exists('gc_collect_cycles')) {
+                @gc_collect_cycles();
+            }
+        }
+
+        // Step 3: try to grab the full profile and overwrite the marker.
+        // Wrap in try/catch and a memory check so a JSON encode that itself
+        // OOMs leaves the marker file intact.
         try {
             $profile = $this->profiler->get_profile_data();
         } catch (\Throwable $e) {
@@ -250,25 +340,17 @@ class WP_Hook_Profiler {
         }
 
         $payload = [
-            'ts' => time(),
-            'url' => isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '',
+            'ts'                => time(),
+            'url'               => $request_uri,
             'memory_peak_bytes' => memory_get_peak_usage(true),
-            'memory_limit' => (string) ini_get('memory_limit'),
-            'fatal_error' => error_get_last(),
-            'profile' => $profile,
+            'memory_limit'      => $mem_limit,
+            'fatal_error'       => $fatal,
+            'profile'           => $profile,
         ];
 
-        // Encode without throwing on partial-data failure; large datasets may
-        // exceed depth or partial-encode if memory is tight.
         $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR);
         if ($json === false) {
             return;
-        }
-
-        // Ensure parent directory exists. Failures are silent.
-        $dir = dirname($dump_path);
-        if (!is_dir($dir)) {
-            @mkdir($dir, 0775, true);
         }
 
         @file_put_contents($dump_path, $json, LOCK_EX);

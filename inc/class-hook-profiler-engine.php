@@ -66,6 +66,95 @@ class WP_Hook_Profiler_Engine {
     private $max_hook_depth = 500;
 
     /**
+     * Maximum number of unique callback+hook+priority entries to track.
+     *
+     * Once the cap is reached, profiling continues but new callbacks are not
+     * added to {@see self::$callback_aggregates}. Plugin-level totals still
+     * accumulate via the wrappers that were already installed.
+     *
+     * Filter: {@code wp_hook_profiler_max_callbacks}
+     *
+     * @var int
+     */
+    public $max_callbacks = 500;
+
+    /**
+     * Maximum number of distinct hook names recorded per plugin in
+     * {@see self::$timing_data[$plugin]['hooks']}.
+     *
+     * Without this cap, the hook list grows linearly with the number of
+     * distinct hooks fired and can cost O(hooks × plugins) memory on sites
+     * with many active plugins.
+     *
+     * Filter: {@code wp_hook_profiler_max_hooks_per_plugin}
+     *
+     * @var int
+     */
+    public $max_hooks_per_plugin = 100;
+
+    /**
+     * Memory usage ratio (current/limit) at which profiling pauses.
+     *
+     * When PHP memory usage reaches this fraction of {@code memory_limit},
+     * the engine stops wrapping new callbacks. Existing wrappers continue
+     * measuring (those are cheap). The pause state is one-way: once set it
+     * is not cleared, so a brief allocation spike that pushes us over the
+     * threshold permanently pauses new instrumentation for the request.
+     *
+     * Filter: {@code wp_hook_profiler_memory_threshold}
+     *
+     * @var float
+     */
+    public $memory_threshold = 0.80;
+
+    /**
+     * Cached PHP memory_limit in bytes, parsed once at start_profiling().
+     * Zero means unlimited (memory_limit = -1) and disables the guard.
+     *
+     * @var int
+     */
+    private $memory_limit_bytes = 0;
+
+    /**
+     * Whether the memory guard has paused new-callback instrumentation.
+     *
+     * @var bool
+     */
+    public $memory_paused = false;
+
+    /**
+     * Whether the callback cap has been hit.
+     *
+     * @var bool
+     */
+    public $callbacks_capped = false;
+
+    /**
+     * Whether at least one plugin hit the per-plugin hook list cap.
+     *
+     * @var bool
+     */
+    public $plugin_hooks_capped = false;
+
+    /**
+     * Hook-fire counter used to throttle memory probes.
+     *
+     * {@see memory_get_usage()} is cheap but not free; calling it once per
+     * hook (≥40k times on busy admin pages) adds measurable overhead. We
+     * probe once per {@code MEMORY_PROBE_INTERVAL} hooks instead.
+     *
+     * @var int
+     */
+    private $memory_probe_counter = 0;
+
+    /**
+     * How often (in hooks fired) the memory guard is probed.
+     *
+     * @var int
+     */
+    private const MEMORY_PROBE_INTERVAL = 100;
+
+    /**
      * Constructor.
      *
      * Loads the plugin detector and callback wrapper dependencies.
@@ -87,10 +176,74 @@ class WP_Hook_Profiler_Engine {
         if ($this->profiling_active) {
             return;
         }
-        
+
+        // Resolve user-tunable limits via filters. Defensive casts so a bad
+        // filter return value can't take down the engine.
+        if (function_exists('apply_filters')) {
+            $this->max_callbacks        = max(1, (int) apply_filters('wp_hook_profiler_max_callbacks', $this->max_callbacks));
+            $this->max_hooks_per_plugin = max(1, (int) apply_filters('wp_hook_profiler_max_hooks_per_plugin', $this->max_hooks_per_plugin));
+            $threshold = (float) apply_filters('wp_hook_profiler_memory_threshold', $this->memory_threshold);
+            if ($threshold > 0 && $threshold < 1) {
+                $this->memory_threshold = $threshold;
+            }
+        }
+
+        // Cache memory_limit as bytes once. -1 (unlimited) disables the guard.
+        $this->memory_limit_bytes = self::parse_php_size((string) ini_get('memory_limit'));
+
         $this->profiling_active = true;
-        
+
         add_action('all', [$this, 'on_hook_start'], -999999);
+    }
+
+    /**
+     * Parse a PHP shorthand size string (e.g. "512M") to bytes.
+     *
+     * @param string $value The PHP ini value.
+     * @return int Bytes, or 0 if unlimited or unparseable.
+     */
+    private static function parse_php_size($value) {
+        $value = trim($value);
+        if ($value === '' || $value === '-1') {
+            return 0;
+        }
+        $unit = strtolower(substr($value, -1));
+        $num  = (int) $value;
+        switch ($unit) {
+            case 'g': return $num * 1024 * 1024 * 1024;
+            case 'm': return $num * 1024 * 1024;
+            case 'k': return $num * 1024;
+            default:  return $num;
+        }
+    }
+
+    /**
+     * Probe current memory usage and set the pause flag if we've crossed
+     * the threshold. Probes only every {@code MEMORY_PROBE_INTERVAL} hooks
+     * to keep overhead minimal.
+     *
+     * @return bool True if the engine should now pause new-callback wrapping.
+     */
+    private function check_memory_pressure() {
+        if ($this->memory_paused) {
+            return true;
+        }
+        if ($this->memory_limit_bytes <= 0) {
+            // Unlimited memory or unparseable limit — guard disabled.
+            return false;
+        }
+
+        $this->memory_probe_counter++;
+        if (($this->memory_probe_counter % self::MEMORY_PROBE_INTERVAL) !== 0) {
+            return false;
+        }
+
+        $usage = memory_get_usage(true);
+        if ($usage >= $this->memory_limit_bytes * $this->memory_threshold) {
+            $this->memory_paused = true;
+            return true;
+        }
+        return false;
     }
     
     /**
@@ -110,16 +263,21 @@ class WP_Hook_Profiler_Engine {
         if ($this->recursion_guard) {
             return;
         }
-        
+
         $this->hook_depth++;
-        
+
         if ($this->hook_depth > $this->max_hook_depth) {
             $this->hook_depth--;
             return;
         }
-        
-        $this->profile_hook_callbacks($hook_name);
-        
+
+        // Memory guard: once we cross the threshold stop wrapping new
+        // callbacks. Already-wrapped callbacks continue measuring (cheap),
+        // so plugin totals still grow but we don't add new allocations.
+        if (!$this->check_memory_pressure()) {
+            $this->profile_hook_callbacks($hook_name);
+        }
+
         $this->hook_count++;
         $this->hook_depth--;
     }
@@ -272,12 +430,24 @@ class WP_Hook_Profiler_Engine {
         uasort($this->timing_data, function($a, $b) {
             return $b['total_time'] <=> $a['total_time'];
         });
-        
+
+        // Convert per-plugin 'hooks' associative map back to a list for
+        // consumer compatibility (debug panel JS, JSON dump consumers).
+        foreach ($this->timing_data as $plugin_key => &$plugin_row) {
+            if (isset($plugin_row['hooks']) && is_array($plugin_row['hooks'])) {
+                $first_key = array_key_first($plugin_row['hooks']);
+                if ($first_key !== null && !is_int($first_key)) {
+                    $plugin_row['hooks'] = array_keys($plugin_row['hooks']);
+                }
+            }
+        }
+        unset($plugin_row);
+
         $callback_data = array_values($this->callback_aggregates);
         usort($callback_data, function($a, $b) {
             return $b['total_time'] <=> $a['total_time'];
         });
-        
+
         // Get plugin loading timing data
         $plugin_loading_data = [];
         if (function_exists('wp_hook_profiler_get_timing_data')) {
@@ -290,6 +460,14 @@ class WP_Hook_Profiler_Engine {
             'plugin_loading' => $plugin_loading_data,
             'total_hooks' => $this->hook_count,
             'total_execution_time' => $this->total_execution_time,
+            'warnings' => [
+                'memory_paused'        => $this->memory_paused,
+                'memory_threshold'     => $this->memory_threshold,
+                'callbacks_capped'     => $this->callbacks_capped,
+                'plugin_hooks_capped'  => $this->plugin_hooks_capped,
+                'max_callbacks'        => $this->max_callbacks,
+                'max_hooks_per_plugin' => $this->max_hooks_per_plugin,
+            ],
         ];
     }
     
