@@ -3,7 +3,7 @@
  * Plugin Name: Hook Profiler
  * Plugin URI: https://github.com/user/wp-hook-profiler
  * Description: Advanced WordPress hook profiler that measures execution time of actions and filters to identify performance bottlenecks by plugin.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Performance Analysis Tools
  * Author URI: https://example.com
  * License: GPL v2 or later
@@ -15,7 +15,7 @@
 
 defined('ABSPATH') || exit;
 
-define('WP_HOOK_PROFILER_VERSION', '1.1.0');
+define('WP_HOOK_PROFILER_VERSION', '1.2.0');
 define('WP_HOOK_PROFILER_FILE', __FILE__);
 define('WP_HOOK_PROFILER_DIR', plugin_dir_path(__FILE__));
 define('WP_HOOK_PROFILER_URL', plugin_dir_url(__FILE__));

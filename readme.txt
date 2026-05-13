@@ -4,7 +4,7 @@ Tags: performance, profiling, hooks, debugging, developer
 Requires at least: 5.0
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.1.0
+Stable tag: 1.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -66,6 +66,15 @@ Yes. The plugin header declares `Network: true` and the mu-plugin shim is instal
 
 == Changelog ==
 
+= 1.2.0 - 2026-05-12 =
+* New: Dump full profile data to JSON file on shutdown for offline analysis
+* New: Memory guard pauses profiling at 80 % of `memory_limit` with `wp_hook_profiler_memory_threshold` filter
+* New: Callback cap (default 500) via `wp_hook_profiler_max_callbacks` filter
+* New: Per-plugin hook cap (default 100) via `wp_hook_profiler_max_hooks_per_plugin` filter
+* New: Per-callback memory deltas recorded alongside execution time
+* New: `fatal_error` field in dump JSON with `type_label`, recorded only for true fatal errors
+* Chore: Add `composer.json` for Composer VCS installation
+
 = 1.1.0 - 2026-04-10 =
 * New: Multi-tab debug panel — plugins overview, slowest callbacks, hook details, and plugin loading analysis
 * New: Advanced filtering and search across all panel views
@@ -81,6 +90,9 @@ Yes. The plugin header declares `Network: true` and the mu-plugin shim is instal
 * Initial release
 
 == Upgrade Notice ==
+
+= 1.2.0 =
+Adds JSON profile dump on shutdown, memory guard, callback / per-plugin hook caps, and per-callback memory deltas. Recommended for all users.
 
 = 1.1.0 =
 Major UI update with multi-tab panel and OOM protection. Recommended for all users.
