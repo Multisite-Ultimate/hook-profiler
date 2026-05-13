@@ -123,6 +123,31 @@ class WP_Hook_Profiler_Engine {
     public $memory_paused = false;
 
     /**
+     * Whether to measure per-callback memory deltas via memory_get_usage().
+     *
+     * Tracking memory adds two memory_get_usage(true) calls per hook callback
+     * (one before, one after). On busy pages with ~200k callback invocations
+     * this is ~400k extra C-level function calls; cheap (no syscall, returns
+     * a cached value) but not free. Disable in production if absolute hot-
+     * path overhead matters.
+     *
+     * Filter: {@code wp_hook_profiler_track_memory}
+     *
+     * @var bool
+     */
+    public $track_memory = true;
+
+    /**
+     * Cumulative absolute memory delta across all profiled callbacks in bytes.
+     *
+     * Sum of |after-before| for every wrapped invocation. NOT the same as
+     * peak memory — useful as a rough total-allocation indicator.
+     *
+     * @var int
+     */
+    public $total_memory_delta = 0;
+
+    /**
      * Whether the callback cap has been hit.
      *
      * @var bool
@@ -186,6 +211,7 @@ class WP_Hook_Profiler_Engine {
             if ($threshold > 0 && $threshold < 1) {
                 $this->memory_threshold = $threshold;
             }
+            $this->track_memory = (bool) apply_filters('wp_hook_profiler_track_memory', $this->track_memory);
         }
 
         // Cache memory_limit as bytes once. -1 (unlimited) disables the guard.
@@ -460,11 +486,13 @@ class WP_Hook_Profiler_Engine {
             'plugin_loading' => $plugin_loading_data,
             'total_hooks' => $this->hook_count,
             'total_execution_time' => $this->total_execution_time,
+            'total_memory_delta' => $this->total_memory_delta,
             'warnings' => [
                 'memory_paused'        => $this->memory_paused,
                 'memory_threshold'     => $this->memory_threshold,
                 'callbacks_capped'     => $this->callbacks_capped,
                 'plugin_hooks_capped'  => $this->plugin_hooks_capped,
+                'track_memory'         => $this->track_memory,
                 'max_callbacks'        => $this->max_callbacks,
                 'max_hooks_per_plugin' => $this->max_hooks_per_plugin,
             ],

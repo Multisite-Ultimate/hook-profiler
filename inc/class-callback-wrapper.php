@@ -105,6 +105,9 @@ class WP_Hook_Profiler_Callback_Wrapper {
                     'total_time' => 0,
                     'call_count' => 0,
                     'average_time' => 0,
+                    'memory_delta_total' => 0,
+                    'memory_delta_peak'  => 0,
+                    'memory_delta_net'   => 0,
                     'priority' => $this->priority,
                     'accepted_args' => $this->accepted_args
                 ];
@@ -114,6 +117,12 @@ class WP_Hook_Profiler_Callback_Wrapper {
             }
         }
 
+        // Sample memory before. memory_get_usage(true) returns the OS-allocated
+        // chunk total (not emalloc) — coarser than (false) but captures real
+        // allocator pressure, and is what triggers OOM.
+        $track_memory = $engine->track_memory;
+        $mem_before   = $track_memory ? memory_get_usage(true) : 0;
+
         $start = hrtime(true);
 
 		$original_function = $this->original_function;
@@ -122,15 +131,28 @@ class WP_Hook_Profiler_Callback_Wrapper {
         $eta = $end - $start;
         $eta /= 1e+6; // nanoseconds to milliseconds
 
+        $mem_after = $track_memory ? memory_get_usage(true) : 0;
+        $mem_delta = $mem_after - $mem_before; // can be negative if GC freed
+
         if (is_finite($eta) && $eta >= 0) {
             if ($track_callback) {
                 $row = &$engine->callback_aggregates[$callback_key];
                 $row['total_time']   += $eta;
                 $row['call_count']++;
                 $row['average_time']  = $row['total_time'] / $row['call_count'];
+                if ($track_memory) {
+                    $row['memory_delta_net']   += $mem_delta;
+                    $row['memory_delta_total'] += abs($mem_delta);
+                    if ($mem_delta > $row['memory_delta_peak']) {
+                        $row['memory_delta_peak'] = $mem_delta;
+                    }
+                }
                 unset($row);
             }
             $engine->total_execution_time += $eta;
+            if ($track_memory) {
+                $engine->total_memory_delta += abs($mem_delta);
+            }
 
             // Update plugin totals (guarded: only accumulate finite, non-negative values)
             $plugin_key = $this->plugin_info['plugin'];
@@ -142,6 +164,8 @@ class WP_Hook_Profiler_Callback_Wrapper {
                     // Associative map: hook_name => true, for O(1) dedup.
                     // Converted back to a list at read time in get_profile_data().
                     'hooks' => [],
+                    'memory_delta_total' => 0,
+                    'memory_delta_net'   => 0,
                     'plugin_name' => $this->plugin_info['plugin_name'],
                     'plugin_file' => $this->plugin_info['plugin_file']
                 ];
@@ -150,6 +174,10 @@ class WP_Hook_Profiler_Callback_Wrapper {
             $plugin_row = &$engine->timing_data[$plugin_key];
             $plugin_row['total_time'] += $eta;
             $plugin_row['callback_count']++;
+            if ($track_memory) {
+                $plugin_row['memory_delta_net']   += $mem_delta;
+                $plugin_row['memory_delta_total'] += abs($mem_delta);
+            }
 
             // Per-plugin hook cap: stop adding new hook names once over cap.
             if (!isset($plugin_row['hooks'][$this->hook_name])) {

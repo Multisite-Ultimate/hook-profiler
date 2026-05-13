@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Per-callback memory tracking: each invocation samples `memory_get_usage(true)`
+  before and after the wrapped callback, and records `memory_delta_net`
+  (signed sum), `memory_delta_total` (sum of abs), and `memory_delta_peak`
+  (max single-call growth) per callback and per plugin. The engine also
+  publishes `total_memory_delta` in `get_profile_data()`. Toggle with
+  `wp_hook_profiler_track_memory` (default true). This turns hook-profiler
+  into a memory-attribution tool rather than just a time profiler — which is
+  the data you actually need to chase OOM regressions.
 - Shutdown dump to a JSON file so profile data survives fatal errors (OOM, timeout).
   Opt-in via the `WP_HOOK_PROFILER_DUMP_PATH` constant or the
   `wp_hook_profiler_dump_path` filter. Pre-allocates a 1 MB memory reserve at
