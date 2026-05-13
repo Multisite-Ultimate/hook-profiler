@@ -69,13 +69,17 @@ class WP_Hook_Profiler {
         add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
         add_action('wp_ajax_wp_hook_profiler_data', [$this, 'ajax_get_profiler_data']);
         add_action('wp_ajax_nopriv_wp_hook_profiler_data', [$this, 'ajax_get_profiler_data']);
-        
+
         if (is_admin()) {
             add_action('admin_footer', [$this, 'render_debug_panel']);
         } else {
             add_action('wp_footer', [$this, 'render_debug_panel']);
         }
 
+        // Register shutdown dump so profile data survives fatal errors (OOM, timeout).
+        // Opt-in via the WP_HOOK_PROFILER_DUMP_PATH constant or the
+        // 'wp_hook_profiler_dump_path' filter — both must resolve to a writable file path.
+        register_shutdown_function([$this, 'dump_profile_data_on_shutdown']);
     }
     
     /**
@@ -192,6 +196,85 @@ class WP_Hook_Profiler {
         include WP_HOOK_PROFILER_DIR . 'views/debug-panel.php';
     }
     
+    /**
+     * Dump profile data to a JSON file on shutdown.
+     *
+     * Designed to survive fatal errors (OOM, timeout) so memory-related
+     * regressions can still be analysed post-mortem. Opt-in by either:
+     *
+     *   - defining the constant {@code WP_HOOK_PROFILER_DUMP_PATH} with an absolute file path; or
+     *   - returning a non-empty string from the {@code wp_hook_profiler_dump_path} filter.
+     *
+     * The filter is evaluated only if {@code apply_filters()} is still callable
+     * (i.e. WordPress has bootstrapped far enough). Failures are swallowed —
+     * dumping must never make a sick request sicker.
+     *
+     * Output JSON shape:
+     * {
+     *   "ts": <unix_timestamp>,
+     *   "url": "<REQUEST_URI>",
+     *   "memory_peak_bytes": <int>,
+     *   "memory_limit": "<php_ini_value>",
+     *   "fatal_error": <last_error|null>,
+     *   "profile": { plugins, callbacks, plugin_loading, total_hooks, total_execution_time }
+     * }
+     *
+     * @return void
+     */
+    public function dump_profile_data_on_shutdown() {
+        $dump_path = '';
+
+        if (defined('WP_HOOK_PROFILER_DUMP_PATH') && is_string(WP_HOOK_PROFILER_DUMP_PATH)) {
+            $dump_path = WP_HOOK_PROFILER_DUMP_PATH;
+        }
+
+        if (function_exists('apply_filters')) {
+            $filtered = apply_filters('wp_hook_profiler_dump_path', $dump_path);
+            if (is_string($filtered) && $filtered !== '') {
+                $dump_path = $filtered;
+            }
+        }
+
+        if ($dump_path === '') {
+            return;
+        }
+
+        if (!$this->profiler) {
+            return;
+        }
+
+        try {
+            $profile = $this->profiler->get_profile_data();
+        } catch (\Throwable $e) {
+            return;
+        }
+
+        $payload = [
+            'ts' => time(),
+            'url' => isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '',
+            'memory_peak_bytes' => memory_get_peak_usage(true),
+            'memory_limit' => (string) ini_get('memory_limit'),
+            'fatal_error' => error_get_last(),
+            'profile' => $profile,
+        ];
+
+        // Encode without throwing on partial-data failure; large datasets may
+        // exceed depth or partial-encode if memory is tight.
+        $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR);
+        if ($json === false) {
+            return;
+        }
+
+        // Ensure parent directory exists. Failures are silent.
+        $dir = dirname($dump_path);
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0775, true);
+        }
+
+        @file_put_contents($dump_path, $json, LOCK_EX);
+        return;
+    }
+
     /**
      * Plugin activation hook.
      *
