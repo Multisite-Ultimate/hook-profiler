@@ -1,6 +1,6 @@
 {
   "name": "hook-profiler",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "WordPress plugin that measures execution time of every action and filter callback to identify performance bottlenecks.",
   "private": true
 }

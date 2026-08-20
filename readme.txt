@@ -4,7 +4,7 @@ Tags: performance, profiling, hooks, debugging, developer
 Requires at least: 5.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.2.0
+Stable tag: 1.2.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -65,6 +65,10 @@ Yes. The plugin header declares `Network: true` and the mu-plugin shim is instal
 4. Hook details tab — per-hook breakdown with plugin filter.
 
 == Changelog ==
+
+= 1.2.1 =
+Version 1.2.1 - Released on 2026-08-19
+- Improved: WordPress compatibility metadata now reflects testing through WordPress 7.1.
 
 = 1.2.0 - 2026-05-12 =
 * New: Dump full profile data to JSON file on shutdown for offline analysis
